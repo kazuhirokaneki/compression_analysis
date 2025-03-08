@@ -1,0 +1,140 @@
+// ==UserScript==
+// @name         Compression Analysis
+// @namespace    http://tampermonkey.net/
+// @version      2.2
+// @description  Analyze compression effectiveness of resources on a webpage
+// @author       kazukaneki
+// @match        *://*/*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const COMPRESSIBLE_TYPES = [
+        'text/html', 'application/x-javascript', 'text/css', 'application/javascript', 'text/javascript', 'text/plain', 'text/xml', 'application/json', 'application/vnd.ms-fontobject', 'application/x-font-opentype', 'application/x-font-truetype', 'application/x-font-ttf', 'application/xml', 'font/eot', 'font/opentype', 'font/otf', 'image/svg+xml', 'image/vnd.microsoft.icon'
+    ];
+
+    function getLoadedResources() {
+        return Array.from(performance.getEntriesByType("resource"))
+            .map(entry => entry.name)
+            .filter(url => new URL(url, window.location.href).hostname === window.location.hostname);
+    }
+
+    async function analyzeURLs(urls) {
+        const errorResponses = [];
+        const successURLs = [];
+        const compressibleURLs = [];
+        const nonCompressibleURLs = [];
+        const compressedURLs = [];
+        const compressionMissedURLs = [];
+        const compressedDataMap = new Map();
+
+        const requests = urls.map(url => fetch(url, { method: 'HEAD' })
+            .then(response => {
+                const status = response.status;
+                if (status >= 400) {
+                    errorResponses.push(url);
+                    return;
+                }
+                successURLs.push(url);
+
+                const contentType = response.headers.get('Content-Type')?.split(';')[0] || 'unknown';
+                const contentEncoding = response.headers.get('Content-Encoding') || 'none';
+
+                if (COMPRESSIBLE_TYPES.includes(contentType)) {
+                    compressibleURLs.push(url);
+                    if (contentEncoding.includes('gzip') || contentEncoding.includes('br')) {
+                        compressedURLs.push({ url, encoding: contentEncoding });
+                        compressedDataMap.set(contentType, (compressedDataMap.get(contentType) || 0) + 1);
+                    } else {
+                        compressionMissedURLs.push(url);
+                    }
+                } else {
+                    nonCompressibleURLs.push(url);
+                }
+            })
+            .catch(() => {}));
+
+        await Promise.all(requests);
+
+        return { errorResponses, successURLs, compressibleURLs, nonCompressibleURLs, compressedURLs, compressionMissedURLs, compressedDataMap };
+    }
+
+    function createPieChart(dataMap, container) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 300;
+        canvas.height = 300;
+        canvas.style.display = 'block';
+        canvas.style.margin = '0 auto';
+        container.appendChild(canvas);
+
+        const ctx = canvas.getContext('2d');
+        const labels = Array.from(dataMap.keys());
+        const data = Array.from(dataMap.values());
+        const total = data.reduce((acc, val) => acc + val, 0);
+        let startAngle = 0;
+        const colors = ['#488f31', '#46946e', '#6ca174', '#8cae7c', '#aaba89', '#c6c798', '#e0d4ab', '#ddc08e', '#dcaa75', '#db9362', '#db7a55', '#d95e50', '#de425b'];
+
+        data.forEach((val, i) => {
+            const sliceAngle = (val / total) * 2 * Math.PI;
+            ctx.fillStyle = colors[i % colors.length];
+            ctx.beginPath();
+            ctx.moveTo(150, 150);
+            ctx.arc(150, 150, 150, startAngle, startAngle + sliceAngle);
+            ctx.closePath();
+            ctx.fill();
+            startAngle += sliceAngle;
+
+            const labelX = 150 + Math.cos(startAngle - sliceAngle / 2) * 100;
+            const labelY = 150 + Math.sin(startAngle - sliceAngle / 2) * 100;
+            ctx.fillStyle = 'black';
+            ctx.font = '12px Arial';
+            ctx.fillText(`${labels[i]} (${data[i]})`, labelX, labelY);
+        });
+    }
+
+    async function displayResults() {
+        const urls = getLoadedResources();
+        const { errorResponses, successURLs, compressibleURLs, nonCompressibleURLs, compressedURLs, compressionMissedURLs, compressedDataMap } = await analyzeURLs(urls);
+
+        const compressionRatio = compressibleURLs.length > 0 ? (compressedURLs.length / compressibleURLs.length * 100).toFixed(2) : 0;
+
+        const resultDiv = document.createElement('div');
+        resultDiv.style.position = 'fixed';
+        resultDiv.style.top = '10px';
+        resultDiv.style.right = '10px';
+        resultDiv.style.backgroundColor = 'white';
+        resultDiv.style.border = '1px solid black';
+        resultDiv.style.padding = '10px';
+        resultDiv.style.zIndex = '9999';
+        resultDiv.style.maxWidth = '400px';
+        resultDiv.style.overflowY = 'auto';
+        resultDiv.style.boxShadow = '0px 4px 6px rgba(0, 0, 0, 0.1)';
+        resultDiv.style.color = 'black';
+        resultDiv.style.textAlign = 'center';
+
+        const closeButton = document.createElement('button');
+        closeButton.innerText = 'Close';
+        closeButton.style.marginBottom = '10px';
+        closeButton.style.display = 'block';
+        closeButton.style.width = '100%';
+        closeButton.onclick = () => resultDiv.remove();
+
+        resultDiv.innerHTML = `<h3>Compression Analysis</h3>
+            <p><strong>Compression Ratio:</strong> ${compressionRatio}%</p>`;
+
+        resultDiv.insertBefore(closeButton, resultDiv.firstChild);
+        document.body.appendChild(resultDiv);
+
+        createPieChart(compressedDataMap, resultDiv);
+
+        const domainMessage = document.createElement('p');
+        domainMessage.innerHTML = '**only analyzing contents in your domain<br>**base html is out of scope - check the compression status<br>**see the code for which content-type is considered compressible';
+        domainMessage.style.fontSize = '10px';
+        domainMessage.style.color = 'darkgray';
+        resultDiv.appendChild(domainMessage);
+    }
+
+    displayResults();
+})();
